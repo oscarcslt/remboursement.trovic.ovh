@@ -1,0 +1,126 @@
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  font-size: 16px;
+}
+
+.dark body,
+html.dark body {
+  background-color: #101820;
+  color: #eef1f6;
+}
+
+html.dark .bg-card,
+html.dark .bg-card\/80 {
+  background-color: #17212c !important;
+  color: #eef1f6;
+}
+
+html.dark .border-border {
+  border-color: #2a3644 !important;
+}
+
+html.dark .text-ink {
+  color: #eef1f6 !important;
+}
+
+html.dark .text-muted {
+  color: #9aa7b8 !important;
+}
+
+html.dark .bg-paper {
+  background-color: #101820 !important;
+}
+
+html.dark .bg-mama-50 {
+  background-color: #241a18 !important;
+}
+
+html.dark .bg-victor-50 {
+  background-color: #241d10 !important;
+}
+
+/* Cartes projet : élévation douce au survol */
+.project-card {
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+.project-card:hover {
+  transform: translateY(-3px);
+  box-shadow: 0 12px 24px -12px rgba(23, 34, 53, 0.25);
+}
+
+/* Barres de progression animées */
+.progress-track {
+  background-color: #eceae2;
+  border-radius: 999px;
+  overflow: hidden;
+}
+html.dark .progress-track {
+  background-color: #223140;
+}
+.progress-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #176b68, #1f8f8a);
+  transition: width 0.6s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.progress-fill.done {
+  background: linear-gradient(90deg, #176b68, #e9604c);
+}
+
+/* Panneaux : apparition fluide */
+.panel-enter {
+  animation: panel-in 0.25s ease both;
+}
+@keyframes panel-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.animate-pop {
+  animation: pop-in 0.18s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+@keyframes pop-in {
+  from { opacity: 0; transform: scale(0.96); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+.toast {
+  animation: toast-in 0.2s ease both;
+}
+@keyframes toast-in {
+  from { opacity: 0; transform: translateX(12px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+/* Grain subtil sur les bannieres */
+.grain-banner {
+  position: relative;
+  overflow: hidden;
+}
+.grain-banner::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.05;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+.backdrop-modal {
+  animation: fade-in 0.15s ease both;
+}
+@keyframes fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.milestone-dot {
+  transition: background-color 0.3s ease, border-color 0.3s ease, color 0.3s ease;
+}
+
+@media (max-width: 420px) {
+  h1 { font-size: 1.5rem; }
+}
