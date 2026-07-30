@@ -21,7 +21,7 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
-L'application est ensuite disponible sur `http://localhost:3000` (ou le port
+L'application est ensuite disponible sur `http://localhost` (ou le port
 défini par `APP_PORT`).
 
 Le schéma SQL (`db/init.sql`) est chargé automatiquement au premier démarrage
