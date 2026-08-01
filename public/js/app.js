@@ -33,7 +33,9 @@
     pendingConfirm: null,
     contestTarget: null,
     creating: false,
-    summary: { monthTotal: 0, weekTotal: 0 }
+    summary: { monthTotal: 0, weekTotal: 0 },
+    duePromptShown: false,
+    settlementModalOpen: false
   };
 
   const app = document.getElementById('app');
@@ -186,6 +188,33 @@
     return 1;
   }
 
+  // ---------- Échéance mensuelle ----------
+  // Le jour d'échéance est ancré sur le jour du mois de création du projet.
+  // Le nombre d'échéances déjà couvertes se déduit du montant versé, ce qui
+  // fait avancer automatiquement la date d'échéance à chaque règlement : le
+  // mois réglé disparaît de l'échéancier au lieu du mois le plus lointain.
+
+  function paidInstallments(project) {
+    if (!project.monthlyBudget || project.monthlyBudget <= 0) return 0;
+    return Math.floor((project.paid + 0.001) / project.monthlyBudget);
+  }
+
+  function nextDueDate(project) {
+    if (!project.monthlyBudget || project.monthlyBudget <= 0) return null;
+    return addMonths(project.createdAt, paidInstallments(project) + 1);
+  }
+
+  function needsSettlementThisMonth(project) {
+    if (project.archived || project.paused || project.status === 'termine') return false;
+    if (!project.monthlyBudget || project.monthlyBudget <= 0) return false;
+    const due = nextDueDate(project);
+    return Boolean(due) && due <= new Date();
+  }
+
+  function dueSettlements() {
+    return state.projects.filter((p) => needsSettlementThisMonth(p));
+  }
+
   // ---------- Schedule (échéancier) ----------
 
   function buildSchedule(project) {
@@ -196,19 +225,18 @@
     const monthly = Number(project.monthlyBudget);
     const remaining = Number(project.remaining);
     const n = Math.max(1, Math.ceil(remaining / monthly));
+    const startOffset = paidInstallments(project);
     const today = new Date();
     const entries = [];
-    let cumulativeExpected = 0;
 
     for (let i = 0; i < n; i += 1) {
       const isLast = i === n - 1;
       const amount = isLast ? Math.round((remaining - monthly * (n - 1)) * 100) / 100 : monthly;
-      cumulativeExpected += amount;
-      const dueDate = addMonths(project.createdAt, i + 1);
-      const late = dueDate <= today && project.paid < cumulativeExpected - 0.01;
+      const dueDate = addMonths(project.createdAt, startOffset + i + 1);
+      const late = dueDate <= today;
       entries.push({ index: i + 1, dueDate, amount, late });
     }
-    return { kind: 'ok', entries, months: n, remaining };
+    return { kind: 'ok', entries, months: n, remaining, nextDueDate: entries[0]?.dueDate || null };
   }
 
   // ---------- Dashboard rendering ----------
@@ -247,6 +275,7 @@
       : 0;
 
     const lateProjects = state.projects.filter((p) => p.late);
+    const dueProjects = dueSettlements();
 
     app.innerHTML = `
       <section class="grain-banner bg-teal-50 border border-teal/20 rounded-2xl p-4 text-sm text-teal-700">
@@ -263,6 +292,19 @@
             ? `Le projet <strong>${esc(lateProjects[0].name)}</strong> n'a reçu aucun versement depuis plus de 35 jours.`
             : `<strong>${lateProjects.length} projets</strong> n'ont reçu aucun versement depuis plus de 35 jours.`}
         </p>
+      </section>` : ''}
+
+      ${dueProjects.length ? `
+      <section class="grain-banner bg-victor-50 border border-victor-200 rounded-2xl p-4 flex items-center justify-between gap-3 flex-wrap">
+        <div class="flex items-center gap-3">
+          <i data-lucide="calendar-clock" class="w-5 h-5 text-victor-700 shrink-0"></i>
+          <p class="text-sm text-victor-700">
+            ${dueProjects.length === 1
+              ? `L'échéance du mois de <strong>${esc(dueProjects[0].name)}</strong> est à régler.`
+              : `<strong>${dueProjects.length} projets</strong> ont une échéance du mois à régler.`}
+          </p>
+        </div>
+        <button id="open-settlement-modal" class="bg-victor-700 text-white px-4 py-2 rounded-2xl text-sm font-medium hover:opacity-90 transition">Régler le mois</button>
       </section>` : ''}
 
       <section class="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
@@ -322,6 +364,13 @@
     renderCreatePanel();
     icons();
     bindDashboardEvents();
+
+    if (!state.duePromptShown && dueProjects.length) {
+      state.duePromptShown = true;
+      openSettlementModal();
+    } else if (state.settlementModalOpen) {
+      renderSettlementModal();
+    }
   }
 
   function summaryCard(icon, label, value, valueClass) {
@@ -360,6 +409,7 @@
     const nextMilestoneText = p.nextMilestone
       ? `Prochain objectif : ${p.nextMilestone}% <span class="text-muted">(encore ${(p.nextMilestone - p.progress).toFixed(1)}%)</span>`
       : 'Tous les objectifs sont atteints';
+    const dueThisMonth = needsSettlementThisMonth(p);
 
     return `
       <article class="project-card bg-card border border-border rounded-2xl p-4 sm:p-5 flex flex-col gap-3">
@@ -367,6 +417,7 @@
           <h3 class="font-serif text-lg font-semibold leading-snug">${esc(p.name)}</h3>
           <div class="flex items-center gap-1.5 shrink-0">
             ${p.contested ? '<span class="w-2.5 h-2.5 rounded-full bg-coral-600" title="Contestation active"></span>' : ''}
+            ${dueThisMonth ? '<span class="w-2.5 h-2.5 rounded-full bg-victor-700" title="Échéance du mois à régler"></span>' : ''}
             <span class="text-xs font-medium px-2.5 py-1 rounded-full ${badge}">${STATUS_LABELS[p.status]}</span>
           </div>
         </div>
@@ -396,6 +447,11 @@
         ${p.late ? `
         <p class="text-xs text-coral-700 flex items-center gap-1">
           <i data-lucide="alert-triangle" class="w-3.5 h-3.5"></i> Aucun versement depuis plus de 35 jours
+        </p>` : ''}
+
+        ${dueThisMonth ? `
+        <p class="text-xs text-victor-700 flex items-center gap-1">
+          <i data-lucide="calendar-clock" class="w-3.5 h-3.5"></i> Échéance du mois à régler
         </p>` : ''}
 
         <button data-open="${p.id}" class="mt-1 w-full flex items-center justify-center gap-2 bg-teal text-white py-2.5 rounded-2xl font-medium hover:bg-teal-700 transition">
@@ -553,6 +609,9 @@
     document.querySelectorAll('[data-open]').forEach((btn) => {
       btn.onclick = () => openProject(Number(btn.dataset.open));
     });
+
+    const openSettlementBtn = document.getElementById('open-settlement-modal');
+    if (openSettlementBtn) openSettlementBtn.onclick = openSettlementModal;
   }
 
   function preserveFocus(input) {
@@ -563,7 +622,7 @@
 
   // ---------- Code modal ----------
 
-  function askCode(role) {
+  function askCode(role, projectId = state.currentProjectId) {
     return new Promise((resolve) => {
       const modal = document.getElementById('code-modal');
       const title = document.getElementById('code-modal-title');
@@ -594,7 +653,7 @@
       async function attempt() {
         const code = input.value;
         try {
-          const { ok } = await api(`/projects/${state.currentProjectId}/verify`, {
+          const { ok } = await api(`/projects/${projectId}/verify`, {
             method: 'POST',
             body: JSON.stringify({ role, code })
           });
@@ -628,6 +687,73 @@
 
   function codeFor(role) {
     return state.verifiedCodes[state.currentProjectId]?.[role] || '';
+  }
+
+  // ---------- Pop-up d'échéance mensuelle ----------
+
+  function openSettlementModal() {
+    state.settlementModalOpen = true;
+    renderSettlementModal();
+  }
+
+  function closeSettlementModal() {
+    state.settlementModalOpen = false;
+    const root = document.getElementById('settlement-modal-root');
+    if (root) root.innerHTML = '';
+  }
+
+  function renderSettlementModal() {
+    const root = document.getElementById('settlement-modal-root');
+    if (!root) return;
+    const due = dueSettlements();
+    if (!due.length) { closeSettlementModal(); return; }
+
+    root.innerHTML = `
+      <div class="fixed inset-0 z-40 flex items-center justify-center p-4">
+        <div class="absolute inset-0 bg-ink/40 backdrop-modal" data-close-settlement-modal></div>
+        <div class="relative bg-card rounded-2xl shadow-xl border border-border max-w-md w-full p-6 animate-pop">
+          <div class="flex items-start justify-between gap-3 mb-1">
+            <h3 class="font-serif text-xl font-semibold">Échéances du mois</h3>
+            <button data-close-settlement-modal class="text-muted hover:text-ink"><i data-lucide="x" class="w-5 h-5"></i></button>
+          </div>
+          <p class="text-sm text-muted mb-4">${esc(monthFmt.format(new Date()))} — voici les projets dont l'échéance mensuelle est arrivée.</p>
+          <ul class="space-y-2 max-h-80 overflow-y-auto pr-1">
+            ${due.map((p) => `
+              <li class="flex items-center justify-between gap-3 border border-victor-200 bg-victor-50 rounded-2xl px-4 py-3">
+                <div class="min-w-0">
+                  <p class="text-sm font-medium truncate">${esc(p.name)}</p>
+                  <p class="text-xs text-muted">${money(Math.min(p.monthlyBudget, p.remaining))} à régler</p>
+                </div>
+                <button data-settle-modal="${p.id}" class="shrink-0 bg-victor-700 text-white px-3 py-2 rounded-2xl text-sm font-medium hover:opacity-90 transition">Régler le mois</button>
+              </li>`).join('')}
+          </ul>
+          <button data-close-settlement-modal class="mt-4 w-full border border-border rounded-2xl py-2.5 font-medium hover:bg-paper transition">Plus tard</button>
+        </div>
+      </div>`;
+    icons();
+
+    root.querySelectorAll('[data-close-settlement-modal]').forEach((el) => {
+      el.onclick = closeSettlementModal;
+    });
+    root.querySelectorAll('[data-settle-modal]').forEach((btn) => {
+      btn.onclick = withBusy(btn, async () => {
+        const projectId = Number(btn.dataset.settleModal);
+        let code = state.verifiedCodes[projectId]?.victor;
+        if (!code) {
+          code = await askCode('victor', projectId);
+          if (code === null) return;
+          state.verifiedCodes[projectId] = state.verifiedCodes[projectId] || {};
+          state.verifiedCodes[projectId].victor = code;
+        }
+        await api(`/projects/${projectId}/settle`, {
+          method: 'POST',
+          body: JSON.stringify({ code })
+        });
+        toast('Échéance réglée.');
+        await loadProjects();
+        render();
+      });
+    });
   }
 
   // ---------- Detail view ----------
@@ -754,7 +880,10 @@
     else if (schedule.kind === 'no_budget') body = '<p class="text-sm text-muted">Ajoute un budget mensuel pour générer un échéancier.</p>';
     else {
       body = `
-        <p class="text-xs text-muted mb-2">${schedule.months} mois restants · ${money(schedule.remaining)} au total</p>
+        <p class="text-xs text-muted mb-1">${schedule.months} mois restants · ${money(schedule.remaining)} au total</p>
+        <p class="text-xs ${schedule.entries[0].late ? 'text-coral-700' : 'text-victor-700'} mb-2">
+          Prochaine échéance : ${esc(monthFmt.format(schedule.nextDueDate))}${schedule.entries[0].late ? ' (en retard)' : ''}
+        </p>
         <ul class="space-y-1.5 max-h-56 overflow-y-auto pr-1">
           ${schedule.entries.map((e) => `
             <li class="flex justify-between items-center text-sm px-3 py-2 rounded-xl ${e.late ? 'bg-coral-50 text-coral-700' : 'bg-paper'}">
@@ -780,32 +909,79 @@
       return `
         <div class="bg-card border border-border rounded-2xl p-5">
           <h3 class="font-serif text-lg font-semibold mb-2">Progression dans le temps</h3>
-          <p class="text-sm text-muted">Pas encore assez de données pour tracer un graphique.</p>
+          <p class="text-sm text-muted">Pas encore assez de données pour tracer un graphique (au moins deux versements sont nécessaires).</p>
         </div>`;
     }
 
-    const W = 600, H = 160, PAD = 12;
+    const W = 640, H = 240;
+    const padLeft = 46, padRight = 16, padTop = 20, padBottom = 30;
+    const innerW = W - padLeft - padRight;
+    const innerH = H - padTop - padBottom;
+
     const t0 = new Date(versements[0].occurredAt).getTime();
-    const t1 = new Date(versements[versements.length - 1].occurredAt).getTime();
+    const now = Date.now();
+    const lastVersementTime = new Date(versements[versements.length - 1].occurredAt).getTime();
+    const t1 = Math.max(lastVersementTime, now);
     const span = Math.max(1, t1 - t0);
+
+    const x = (t) => padLeft + ((t - t0) / span) * innerW;
+    const y = (v) => padTop + (1 - Math.min(1, v / totalAmount)) * innerH;
 
     let cumulative = 0;
     const points = versements.map((v) => {
       cumulative += Number(v.amount);
-      const x = PAD + ((new Date(v.occurredAt).getTime() - t0) / span) * (W - PAD * 2);
-      const y = H - PAD - (Math.min(1, cumulative / totalAmount)) * (H - PAD * 2);
-      return { x, y };
+      return {
+        x: x(new Date(v.occurredAt).getTime()),
+        y: y(cumulative),
+        cumulative,
+        date: v.occurredAt,
+        amount: Number(v.amount)
+      };
     });
-
-    const polyline = points.map((pt) => `${pt.x.toFixed(1)},${pt.y.toFixed(1)}`).join(' ');
     const last = points[points.length - 1];
+
+    const linePath = points.map((pt, i) => `${i === 0 ? 'M' : 'L'} ${pt.x.toFixed(1)} ${pt.y.toFixed(1)}`).join(' ');
+    const areaPath = `${linePath} L ${last.x.toFixed(1)} ${(H - padBottom).toFixed(1)} L ${points[0].x.toFixed(1)} ${(H - padBottom).toFixed(1)} Z`;
+
+    const gridFracs = [0, 0.25, 0.5, 0.75, 1];
+    const gridLines = gridFracs.map((frac) => {
+      const gy = padTop + (1 - frac) * innerH;
+      return `
+        <line x1="${padLeft}" y1="${gy.toFixed(1)}" x2="${W - padRight}" y2="${gy.toFixed(1)}"
+          stroke="${frac === 1 ? '#e9604c' : '#dfddd5'}" stroke-width="1" stroke-dasharray="${frac === 1 ? '4 3' : '0'}" />
+        <text x="${padLeft - 8}" y="${(gy + 3).toFixed(1)}" text-anchor="end" font-size="9" fill="#687384">${Math.round(frac * 100)}%</text>`;
+    }).join('');
+
+    const pointMarkers = points.map((pt, i) => {
+      const isLast = i === points.length - 1;
+      return `
+        <circle cx="${pt.x.toFixed(1)}" cy="${pt.y.toFixed(1)}" r="${isLast ? 5 : 3}" fill="${isLast ? '#e9604c' : '#176b68'}" stroke="#ffffff" stroke-width="1.5">
+          <title>${esc(fmtDate(pt.date))} — ${esc(money(pt.amount))} (cumul ${esc(money(pt.cumulative))})</title>
+        </circle>`;
+    }).join('');
+
+    const startLabel = fmtDate(versements[0].occurredAt);
+    const endLabel = t1 > lastVersementTime + 1000 * 60 * 60 * 24 ? "Aujourd'hui" : fmtDate(versements[versements.length - 1].occurredAt);
 
     return `
       <div class="bg-card border border-border rounded-2xl p-5">
-        <h3 class="font-serif text-lg font-semibold mb-2">Progression dans le temps</h3>
-        <svg viewBox="0 0 ${W} ${H}" class="w-full h-40">
-          <polyline points="${polyline}" fill="none" stroke="#176b68" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round" />
-          <circle cx="${last.x}" cy="${last.y}" r="5" fill="#e9604c" />
+        <div class="flex items-baseline justify-between mb-2">
+          <h3 class="font-serif text-lg font-semibold">Progression dans le temps</h3>
+          <span class="text-xs text-muted">Objectif : ${money(totalAmount)}</span>
+        </div>
+        <svg viewBox="0 0 ${W} ${H}" class="w-full h-56">
+          <defs>
+            <linearGradient id="chart-fill" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stop-color="#176b68" stop-opacity="0.22" />
+              <stop offset="100%" stop-color="#176b68" stop-opacity="0" />
+            </linearGradient>
+          </defs>
+          ${gridLines}
+          <path d="${areaPath}" fill="url(#chart-fill)" stroke="none" />
+          <path d="${linePath}" fill="none" stroke="#176b68" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round" />
+          ${pointMarkers}
+          <text x="${padLeft}" y="${H - 8}" font-size="9" fill="#687384" text-anchor="start">${esc(startLabel)}</text>
+          <text x="${W - padRight}" y="${H - 8}" font-size="9" fill="#687384" text-anchor="end">${esc(endLabel)}</text>
         </svg>
       </div>`;
   }
