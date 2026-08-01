@@ -28,6 +28,13 @@ services:
       DB_USER: ${DB_USER:-reimburse}
       DB_PASSWORD: ${DB_PASSWORD:-change-me}
       PORT: 3000
+      APP_BASE_URL: ${APP_BASE_URL:-http://localhost}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_SECURE: ${SMTP_SECURE:-false}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM: "${SMTP_FROM:-Suivi remboursement <no-reply@trovic.ovh>}"
     ports:
       - "${APP_PORT:-80}:3000"
     depends_on:

@@ -1,9 +1,12 @@
 const express = require('express');
 const { pool } = require('../db/pool');
 const { computeProjectView, parseMilestones } = require('../projectStats');
+const { getProjectRow, getTransactions } = require('../db/repo');
+const { createAndSendInvite } = require('./invitations');
 
 const router = express.Router();
 const MAX_PROJECTS = 999;
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 function badRequest(res, message) {
   return res.status(400).json({ error: message });
@@ -15,19 +18,6 @@ function notFound(res, message = 'Projet introuvable.') {
 
 function forbidden(res, message = 'Code incorrect.') {
   return res.status(403).json({ error: message });
-}
-
-async function getProjectRow(id) {
-  const [rows] = await pool.query('SELECT * FROM projects WHERE id = ?', [id]);
-  return rows[0] || null;
-}
-
-async function getTransactions(projectId) {
-  const [rows] = await pool.query(
-    'SELECT * FROM transactions WHERE project_id = ? ORDER BY occurred_at DESC, id DESC',
-    [projectId]
-  );
-  return rows;
 }
 
 function isPositiveNumber(value) {
@@ -115,7 +105,7 @@ router.get('/:id', async (req, res, next) => {
 // POST /api/projects
 router.post('/', async (req, res, next) => {
   try {
-    const { name, totalAmount, initialContribution, monthlyBudget, note, secretCode, adminCode, milestones } =
+    const { name, totalAmount, initialContribution, monthlyBudget, note, mamanEmail, adminCode, milestones } =
       req.body || {};
 
     if (!name || typeof name !== 'string' || !name.trim() || name.length > 80) {
@@ -134,8 +124,8 @@ router.post('/', async (req, res, next) => {
     if (note && (typeof note !== 'string' || note.length > 500)) {
       return badRequest(res, 'La note ne doit pas dépasser 500 caractères.');
     }
-    if (!secretCode || !String(secretCode).trim()) {
-      return badRequest(res, 'Le code maman est obligatoire.');
+    if (!mamanEmail || !EMAIL_REGEX.test(String(mamanEmail).trim())) {
+      return badRequest(res, "L'e-mail de maman est obligatoire et doit être valide.");
     }
     if (!adminCode || !String(adminCode).trim()) {
       return badRequest(res, 'Le code Victor est obligatoire.');
@@ -160,15 +150,15 @@ router.post('/', async (req, res, next) => {
       await conn.beginTransaction();
       const [result] = await conn.query(
         `INSERT INTO projects
-          (name, total_amount, monthly_budget, note, secret_code, admin_code, started, paused, archived, milestones)
-         VALUES (?, ?, ?, ?, ?, ?, 1, 0, 0, ?)`,
+          (name, total_amount, monthly_budget, note, secret_code, admin_code, maman_email, started, paused, archived, milestones)
+         VALUES (?, ?, ?, ?, NULL, ?, ?, 1, 0, 0, ?)`,
         [
           name.trim(),
           totalAmount,
           monthlyBudget,
           note ? note.trim() : null,
-          String(secretCode).trim(),
           String(adminCode).trim(),
+          String(mamanEmail).trim(),
           milestoneList.join(',')
         ]
       );
@@ -183,7 +173,14 @@ router.post('/', async (req, res, next) => {
 
       const project = await getProjectRow(projectId);
       const transactions = await getTransactions(projectId);
-      res.status(201).json(computeProjectView(project, transactions));
+      const invite = await createAndSendInvite(project);
+
+      res.status(201).json({
+        ...computeProjectView(project, transactions),
+        mamanEmail: project.maman_email,
+        inviteEmailSent: invite.sent,
+        ...(invite.sent ? {} : { inviteLink: invite.inviteLink })
+      });
     } catch (err) {
       await conn.rollback();
       throw err;
@@ -201,8 +198,9 @@ router.post('/:id/verify', async (req, res, next) => {
     const project = await getProjectRow(req.params.id);
     if (!project) return notFound(res);
     const { role, code } = req.body || {};
-    const expected = role === 'victor' ? project.admin_code : role === 'maman' ? project.secret_code : null;
-    if (expected === null) return badRequest(res, 'Rôle inconnu.');
+    if (role !== 'victor' && role !== 'maman') return badRequest(res, 'Rôle inconnu.');
+    const expected = role === 'victor' ? project.admin_code : project.secret_code;
+    if (role === 'maman' && !expected) return res.json({ ok: false, reason: 'not_activated' });
     const ok = String(code || '') === String(expected);
     res.json({ ok });
   } catch (err) {
@@ -212,12 +210,55 @@ router.post('/:id/verify', async (req, res, next) => {
 
 function requireCode(project, role, code, res) {
   const expected = role === 'victor' ? project.admin_code : project.secret_code;
+  if (!expected) {
+    forbidden(res, "Maman n'a pas encore activé son accès à ce projet.");
+    return false;
+  }
   if (String(code || '') !== String(expected)) {
     forbidden(res);
     return false;
   }
   return true;
 }
+
+// POST /api/projects/:id/invite/status  { code }  - infos sur l'invitation maman (Victor uniquement)
+router.post('/:id/invite/status', async (req, res, next) => {
+  try {
+    const project = await getProjectRow(req.params.id);
+    if (!project) return notFound(res);
+    const { code } = req.body || {};
+    if (String(code || '') !== String(project.admin_code)) return forbidden(res);
+
+    res.json({
+      mamanEmail: project.maman_email,
+      mamanActivated: Boolean(project.secret_code),
+      inviteExpiresAt: project.invite_token && project.invite_token_expires_at ? project.invite_token_expires_at : null
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/projects/:id/invite/resend  { code }  - renvoie (ou régénère) l'invitation maman (Victor uniquement)
+router.post('/:id/invite/resend', async (req, res, next) => {
+  try {
+    const project = await getProjectRow(req.params.id);
+    if (!project) return notFound(res);
+    const { code } = req.body || {};
+    if (String(code || '') !== String(project.admin_code)) return forbidden(res);
+    if (!project.maman_email) {
+      return badRequest(res, "Aucun e-mail n'est associé à ce projet pour Maman.");
+    }
+
+    const invite = await createAndSendInvite(project);
+    res.json({
+      inviteEmailSent: invite.sent,
+      ...(invite.sent ? {} : { inviteLink: invite.inviteLink })
+    });
+  } catch (err) {
+    next(err);
+  }
+});
 
 // POST /api/projects/:id/transactions  { amount, note, code }
 router.post('/:id/transactions', async (req, res, next) => {

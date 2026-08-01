@@ -56,6 +56,7 @@ function computeProjectView(project, transactions) {
     started: Boolean(project.started),
     paused: Boolean(project.paused),
     archived: Boolean(project.archived),
+    mamanActivated: Boolean(project.secret_code),
     contested: hasContestation,
     late: isLate,
     status,

@@ -5,6 +5,7 @@ const cors = require('cors');
 
 const { waitForDatabase } = require('./db/pool');
 const projectsRouter = require('./routes/projects');
+const { router: invitationsRouter } = require('./routes/invitations');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -15,6 +16,7 @@ app.use(express.json({ limit: '200kb' }));
 
 app.get('/api/health', (req, res) => res.json({ ok: true }));
 app.use('/api/projects', projectsRouter);
+app.use('/api/invitations', invitationsRouter);
 
 app.use(express.static(PUBLIC_DIR));
 app.get('*', (req, res, next) => {

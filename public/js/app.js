@@ -35,7 +35,8 @@
     creating: false,
     summary: { monthTotal: 0, weekTotal: 0 },
     duePromptShown: false,
-    settlementModalOpen: false
+    settlementModalOpen: false,
+    mamanInviteStatus: null
   };
 
   const app = document.getElementById('app');
@@ -158,6 +159,7 @@
     state.view = 'detail';
     state.mode = 'public';
     state.txFilter = 'all';
+    state.mamanInviteStatus = null;
     render();
   }
 
@@ -519,13 +521,16 @@
             <textarea name="note" maxlength="500" rows="2" class="border border-border rounded-2xl px-3 py-2.5 focus:outline-none focus:ring-2 focus:ring-teal/40"></textarea>
           </label>
           <label class="flex flex-col gap-1 text-sm">
-            Code Maman *
-            <input name="secretCode" required class="border border-border rounded-2xl px-3 py-2.5 focus:outline-none focus:ring-2 focus:ring-teal/40" />
+            E-mail de maman *
+            <input name="mamanEmail" type="email" required placeholder="maman@exemple.fr" class="border border-border rounded-2xl px-3 py-2.5 focus:outline-none focus:ring-2 focus:ring-teal/40" />
           </label>
           <label class="flex flex-col gap-1 text-sm">
             Code Victor *
             <input name="adminCode" required class="border border-border rounded-2xl px-3 py-2.5 focus:outline-none focus:ring-2 focus:ring-teal/40" />
           </label>
+          <p class="text-xs text-muted sm:col-span-2">
+            Maman recevra un e-mail avec un lien pour choisir elle-même son propre code d'accès.
+          </p>
           <div class="sm:col-span-2 flex justify-end gap-2 pt-2">
             <button type="button" id="cancel-create" class="border border-border rounded-2xl px-4 py-2.5 font-medium hover:bg-paper transition">Annuler</button>
             <button type="submit" id="submit-create" class="bg-teal text-white rounded-2xl px-5 py-2.5 font-medium hover:bg-teal-700 transition">Créer le projet</button>
@@ -547,7 +552,7 @@
         ? milestonesRaw.split(',').map((n) => Number(n.trim())).filter((n) => Number.isFinite(n))
         : undefined;
 
-      await api('/projects', {
+      const created = await api('/projects', {
         method: 'POST',
         body: JSON.stringify({
           name: data.get('name'),
@@ -555,14 +560,48 @@
           initialContribution: Number(data.get('initialContribution') || 0),
           monthlyBudget: Number(data.get('monthlyBudget')),
           note: data.get('note') || null,
-          secretCode: data.get('secretCode'),
+          mamanEmail: data.get('mamanEmail'),
           adminCode: data.get('adminCode'),
           milestones
         })
       });
-      toast('Projet créé avec succès.');
       state.createPanelOpen = false;
       await refreshDashboard();
+
+      if (created.inviteEmailSent) {
+        toast(`Projet créé, invitation envoyée à ${created.mamanEmail}.`);
+      } else {
+        toast('Projet créé.');
+        showInviteLinkModal(created.mamanEmail, created.inviteLink);
+      }
+    });
+  }
+
+  function showInviteLinkModal(email, link) {
+    showModal({
+      title: "Invitation à transmettre",
+      bodyHtml: `
+        <p class="text-sm text-muted mb-3">
+          L'e-mail n'a pas pu être envoyé automatiquement à <strong>${esc(email)}</strong>
+          (SMTP non configuré ou envoi échoué). Transmets ce lien à Maman pour qu'elle puisse définir son code :
+        </p>
+        <div class="flex gap-2">
+          <input readonly value="${esc(link)}" class="flex-1 border border-border rounded-2xl px-3 py-2 text-sm bg-paper" onclick="this.select()" />
+          <button id="copy-invite-link" class="shrink-0 border border-border rounded-2xl px-3 py-2 text-sm font-medium hover:bg-paper transition">Copier</button>
+        </div>`,
+      onRender: () => {
+        const copyBtn = document.getElementById('copy-invite-link');
+        if (copyBtn) {
+          copyBtn.onclick = async () => {
+            try {
+              await navigator.clipboard.writeText(link);
+              toast('Lien copié.');
+            } catch (_) {
+              toast('Impossible de copier automatiquement, sélectionne le lien.', 'error');
+            }
+          };
+        }
+      }
     });
   }
 
@@ -675,14 +714,42 @@
 
   async function switchMode(role) {
     if (role === 'public') { state.mode = 'public'; renderDetail(); return; }
+
+    if (role === 'maman' && !state.currentProject.mamanActivated) {
+      showModal({
+        title: "Accès maman pas encore activé",
+        bodyHtml: `<p class="text-sm text-muted">Maman n'a pas encore défini son code d'accès pour ce projet.
+          Elle doit d'abord cliquer sur le lien reçu par e-mail. Depuis "Réglage Victor", tu peux renvoyer
+          cette invitation si besoin.</p>`
+      });
+      return;
+    }
+
     const cached = state.verifiedCodes[state.currentProjectId]?.[role];
-    if (cached) { state.mode = role; renderDetail(); return; }
+    if (cached) {
+      state.mode = role;
+      if (role === 'victor') await loadMamanInviteStatus(cached);
+      renderDetail();
+      return;
+    }
     const code = await askCode(role);
     if (code === null) return;
     state.verifiedCodes[state.currentProjectId] = state.verifiedCodes[state.currentProjectId] || {};
     state.verifiedCodes[state.currentProjectId][role] = code;
     state.mode = role;
+    if (role === 'victor') await loadMamanInviteStatus(code);
     renderDetail();
+  }
+
+  async function loadMamanInviteStatus(victorCode) {
+    try {
+      state.mamanInviteStatus = await api(`/projects/${state.currentProjectId}/invite/status`, {
+        method: 'POST',
+        body: JSON.stringify({ code: victorCode })
+      });
+    } catch (_) {
+      state.mamanInviteStatus = null;
+    }
   }
 
   function codeFor(role) {
@@ -754,6 +821,35 @@
         render();
       });
     });
+  }
+
+  // ---------- Modale générique (infos, lien d'invitation) ----------
+
+  function showModal({ title, bodyHtml, onRender }) {
+    const root = document.getElementById('generic-modal-root');
+    if (!root) return;
+    root.innerHTML = `
+      <div class="fixed inset-0 z-40 flex items-center justify-center p-4">
+        <div class="absolute inset-0 bg-ink/40 backdrop-modal" data-close-generic-modal></div>
+        <div class="relative bg-card rounded-2xl shadow-xl border border-border max-w-md w-full p-6 animate-pop">
+          <div class="flex items-start justify-between gap-3 mb-2">
+            <h3 class="font-serif text-xl font-semibold">${esc(title)}</h3>
+            <button data-close-generic-modal class="text-muted hover:text-ink"><i data-lucide="x" class="w-5 h-5"></i></button>
+          </div>
+          <div>${bodyHtml}</div>
+          <button data-close-generic-modal class="mt-4 w-full border border-border rounded-2xl py-2.5 font-medium hover:bg-paper transition">Fermer</button>
+        </div>
+      </div>`;
+    icons();
+    root.querySelectorAll('[data-close-generic-modal]').forEach((el) => {
+      el.onclick = closeGenericModal;
+    });
+    if (onRender) onRender();
+  }
+
+  function closeGenericModal() {
+    const root = document.getElementById('generic-modal-root');
+    if (root) root.innerHTML = '';
   }
 
   // ---------- Detail view ----------
@@ -1004,9 +1100,25 @@
   }
 
   function renderVictorPanel(p, schedule) {
+    const invite = state.mamanInviteStatus;
     return `
       <section class="bg-victor-50 border border-victor-200 rounded-2xl p-5 space-y-5 panel-enter">
         <h3 class="font-serif text-lg font-semibold text-victor-700">Réglage Victor</h3>
+
+        <div class="bg-card border border-victor-200 rounded-2xl p-4 flex flex-wrap items-center justify-between gap-3">
+          <div class="min-w-0">
+            <p class="text-sm font-medium">Accès maman</p>
+            ${invite ? `
+              <p class="text-xs text-muted">
+                ${invite.mamanActivated
+                  ? `Activé — invitation envoyée à ${esc(invite.mamanEmail)}`
+                  : `En attente d'activation — invitation envoyée à ${esc(invite.mamanEmail)}`}
+              </p>` : '<p class="text-xs text-muted">Chargement…</p>'}
+          </div>
+          <button id="resend-invite-btn" class="shrink-0 border border-victor-200 bg-victor-50 px-3 py-2 rounded-2xl text-sm font-medium hover:bg-victor-200/40 transition">
+            ${invite && invite.mamanActivated ? 'Renvoyer un lien (réinitialiser le code)' : "Renvoyer l'invitation"}
+          </button>
+        </div>
 
         <form id="add-tx-form" class="grid sm:grid-cols-[1fr_1fr_auto] gap-2 items-end">
           <label class="flex flex-col gap-1 text-sm">
@@ -1158,6 +1270,25 @@
   }
 
   function bindVictorEvents(schedule) {
+    const resendBtn = document.getElementById('resend-invite-btn');
+    if (resendBtn) {
+      resendBtn.onclick = withBusy(resendBtn, async () => {
+        const result = await api(`/projects/${state.currentProjectId}/invite/resend`, {
+          method: 'POST',
+          body: JSON.stringify({ code: codeFor('victor') })
+        });
+        if (result.inviteEmailSent) {
+          toast('Invitation renvoyée par e-mail.');
+        } else {
+          toast('Invitation régénérée.');
+          showInviteLinkModal(state.mamanInviteStatus?.mamanEmail || '', result.inviteLink);
+        }
+        await loadMamanInviteStatus(codeFor('victor'));
+        await refreshCurrentProject();
+        renderDetail();
+      });
+    }
+
     const addForm = document.getElementById('add-tx-form');
     const addSubmit = document.getElementById('add-tx-submit');
     addForm.onsubmit = withBusy(addSubmit, async (e) => {
@@ -1280,12 +1411,111 @@
     document.getElementById('new-project-btn-mobile').onclick = openCreate;
   }
 
+  // ---------- Activation du code maman (lien d'invitation) ----------
+
+  function clearInviteFromUrl() {
+    const url = new URL(window.location.href);
+    url.searchParams.delete('invite');
+    window.history.replaceState({}, '', url.toString());
+  }
+
+  function renderClaimError(message) {
+    app.innerHTML = `
+      <div class="max-w-md mx-auto text-center py-16 bg-card border border-border rounded-2xl px-6">
+        <i data-lucide="link-2-off" class="w-8 h-8 mx-auto text-coral-700 mb-3"></i>
+        <p class="font-serif text-lg font-semibold mb-1">Lien invalide</p>
+        <p class="text-sm text-muted mb-4">${esc(message)}</p>
+        <button id="claim-back-btn" class="bg-teal text-white px-4 py-2.5 rounded-2xl font-medium hover:bg-teal-700 transition">Aller au tableau de bord</button>
+      </div>`;
+    icons();
+    document.getElementById('claim-back-btn').onclick = async () => {
+      clearInviteFromUrl();
+      await refreshDashboard();
+    };
+  }
+
+  function renderClaimScreen(token, data) {
+    app.innerHTML = `
+      <div class="max-w-md mx-auto py-10">
+        <div class="bg-card border border-border rounded-2xl p-6 space-y-4 panel-enter">
+          <div>
+            <p class="text-xs uppercase tracking-wide text-mama-700 mb-1">Invitation de Victor</p>
+            <h2 class="font-serif text-2xl font-semibold">Bienvenue !</h2>
+            <p class="text-sm text-muted mt-2">
+              Victor a créé le projet <strong>${esc(data.projectName)}</strong> (${money(data.totalAmount)})
+              pour suivre ce remboursement avec toi, en toute transparence. Choisis ton code d'accès personnel
+              pour continuer — tu pourras l'utiliser à chaque visite pour consulter ce projet et signaler
+              une contestation si besoin.
+            </p>
+          </div>
+          <form id="claim-form" class="space-y-3">
+            <label class="flex flex-col gap-1 text-sm">
+              Choisis ton code
+              <input name="code" type="password" required class="border border-border rounded-2xl px-3 py-2.5 focus:outline-none focus:ring-2 focus:ring-mama-200" />
+            </label>
+            <label class="flex flex-col gap-1 text-sm">
+              Confirme ton code
+              <input name="codeConfirm" type="password" required class="border border-border rounded-2xl px-3 py-2.5 focus:outline-none focus:ring-2 focus:ring-mama-200" />
+            </label>
+            <p id="claim-error" class="hidden text-coral-700 text-sm"></p>
+            <button type="submit" id="claim-submit" class="w-full bg-mama-700 text-white rounded-2xl py-2.5 font-medium hover:opacity-90 transition">Activer mon accès</button>
+          </form>
+        </div>
+      </div>`;
+    icons();
+
+    const form = document.getElementById('claim-form');
+    const submitBtn = document.getElementById('claim-submit');
+    const errorEl = document.getElementById('claim-error');
+    form.onsubmit = withBusy(submitBtn, async (e) => {
+      e.preventDefault();
+      errorEl.classList.add('hidden');
+      const formData = new FormData(form);
+      const code = formData.get('code');
+      const codeConfirm = formData.get('codeConfirm');
+      if (code !== codeConfirm) {
+        errorEl.textContent = 'Les deux codes ne correspondent pas.';
+        errorEl.classList.remove('hidden');
+        return;
+      }
+      try {
+        const result = await api(`/invitations/${token}`, {
+          method: 'POST',
+          body: JSON.stringify({ code })
+        });
+        clearInviteFromUrl();
+        state.verifiedCodes[result.projectId] = state.verifiedCodes[result.projectId] || {};
+        state.verifiedCodes[result.projectId].maman = code;
+        toast('Ton accès est activé, bienvenue !');
+        await openProject(result.projectId);
+        state.mode = 'maman';
+        renderDetail();
+      } catch (err) {
+        errorEl.textContent = err.message;
+        errorEl.classList.remove('hidden');
+      }
+    });
+  }
+
+  async function handleInviteFromUrl() {
+    const token = new URLSearchParams(window.location.search).get('invite');
+    if (!token) return false;
+    try {
+      const data = await api(`/invitations/${token}`);
+      renderClaimScreen(token, data);
+    } catch (err) {
+      renderClaimError(err.message);
+    }
+    return true;
+  }
+
   // ---------- Init ----------
 
   async function init() {
     bindHeaderEvents();
     try {
-      await refreshDashboard();
+      const handledInvite = await handleInviteFromUrl();
+      if (!handledInvite) await refreshDashboard();
     } catch (err) {
       app.innerHTML = `<div class="text-center py-16 text-coral-700">Impossible de charger les projets : ${esc(err.message)}</div>`;
     }
